@@ -34,7 +34,6 @@ cosmic-text = "0.19.0"
 default-features = false
 package = "gpui-fast"
 version = "^0.1.14"
-path = "../gpui"
 
 [dependencies.anyhow]
 version = "1.0.86"

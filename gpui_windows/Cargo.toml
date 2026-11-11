@@ -30,7 +30,6 @@ screen-capture = ["gpui/screen-capture", "scap"]
 default-features = false
 package = "gpui-fast"
 version = "^0.1.14"
-path = "../gpui"
 
 [target."cfg(target_os = \"windows\")".dependencies]
 windows-numerics = "0.3"
