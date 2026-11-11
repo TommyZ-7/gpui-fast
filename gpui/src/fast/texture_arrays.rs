@@ -127,6 +127,20 @@ impl TextureArray {
         self.format
     }
 
+    /// Creates a handle for unit tests that only exercise cache bookkeeping.
+    ///
+    /// The handle owns no GPU resource; painting or uploading it will fail
+    /// because its id is not registered with a platform backend.
+    #[doc(hidden)]
+    pub fn new_for_test(size: Size<DevicePixels>, layers: u32) -> Self {
+        Self {
+            id: TextureArrayId(0),
+            size,
+            layers,
+            format: TextureArrayFormat::Bc7RgbaUnorm,
+        }
+    }
+
     /// Releases the array and its GPU memory without requiring a live window.
     pub fn remove(self) {
         remove(self);
