@@ -11,10 +11,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use gpui::{
-    AtlasKey, AtlasTile, Bounds, ContentMask, Corners, DevicePixels, Edges, FontId, GlyphId, Hsla,
+    AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, ContentMask, Corners,
+    DevicePixels, Edges, FontId, GlyphId, Hsla,
     ImageId, LayerFrame, LayerKey, MonochromeSprite, Path, PlatformAtlas, PolychromeSprite, Quad,
     RenderGlyphParams, RenderImageParams, Rgba, ScaledPixels, Scene, SceneLayers, Shadow, Size,
-    SubpixelSprite, TileCoord, TransformationMatrix, Underline, layer_tile_id,
+    SubpixelSprite, TextureArrayFormat, TextureArrayId, TextureArrayPlatform, TileCoord,
+    TileId, TransformationMatrix, Underline, layer_tile_id,
     layer_tile_texture_id, linear_color_stop, linear_gradient, point, px, rgba, size,
 };
 
@@ -841,6 +843,7 @@ pub(super) struct Harness {
     path_targets: Option<PathTargets>,
     state: FrameState,
     dynamic_textures: crate::fast::dynamic_textures::TextureStore,
+    texture_arrays: Arc<crate::fast::texture_arrays::TextureArrayStore>,
     dual_source_blending: bool,
 }
 
@@ -949,6 +952,12 @@ impl Harness {
         let instance_alignment = device.limits().min_storage_buffer_offset_alignment as u64;
         let instance_buffer = create_instance_buffer(&device, INITIAL_INSTANCE_CAPACITY);
         let atlas = WgpuAtlas::new(device.clone(), queue.clone(), color_texture_format);
+        let texture_arrays = crate::fast::texture_arrays::TextureArrayStore::new(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            bind_group_layouts.texture_array.clone(),
+            atlas_sampler.clone(),
+        );
 
         Some(Harness {
             device,
@@ -970,6 +979,7 @@ impl Harness {
             path_targets: None,
             state: FrameState::default(),
             dynamic_textures: crate::fast::dynamic_textures::TextureStore::default(),
+            texture_arrays,
             dual_source_blending,
         })
     }
@@ -1105,6 +1115,7 @@ impl FrameHost for Harness {
         let path_targets = self.path_targets.as_ref();
         Ok(FrameTarget {
             dynamic_textures: &self.dynamic_textures,
+            texture_arrays: &self.texture_arrays,
             device: &self.device,
             queue: &self.queue,
             pipelines: &self.pipelines,
@@ -1200,4 +1211,71 @@ pub(super) fn read_back(
         }
     }
     pixels
+}
+
+
+#[test]
+fn texture_array_layers_sample_their_own_contents() {
+    let Some(mut harness) = Harness::new() else {
+        return;
+    };
+    let id = TextureArrayId::from_atlas_texture_id(AtlasTextureId {
+        index: 0xD000_0000 + 4_242,
+        kind: AtlasTextureKind::Polychrome,
+    })
+    .expect("array id");
+    let array_size = device_size(8, 8);
+    let format = TextureArrayFormat::Bc7RgbaUnorm;
+    if harness
+        .texture_arrays
+        .create_texture(id, array_size, 2, format)
+        .is_err()
+    {
+        return;
+    }
+    harness
+        .texture_arrays
+        .upload_layer(id, 0, &[0u8; 64])
+        .expect("layer 0");
+    harness
+        .texture_arrays
+        .upload_layer(id, 1, &[0xffu8; 64])
+        .expect("layer 1");
+
+    let scene = |layer: u32| {
+        let mut scene = Scene::default();
+        scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: 1,
+            grayscale: false.into(),
+            opacity: 1.,
+            bounds: sp(0., 0., 32., 32.),
+            content_mask: no_mask(),
+            corner_radii: Corners::default(),
+            tile: AtlasTile {
+                texture_id: id.atlas_texture_id(),
+                tile_id: TileId(layer),
+                padding: 0,
+                bounds: Bounds {
+                    origin: point(DevicePixels(0), DevicePixels(0)),
+                    size: array_size,
+                },
+            },
+        });
+        scene
+    };
+
+    let target = gpui::size(DevicePixels(32), DevicePixels(32));
+    let clear = Rgba {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 255.0,
+    };
+    let layer_zero = harness.render(&scene(0), target, clear);
+    let layer_one = harness.render(&scene(1), target, clear);
+    assert_ne!(
+        layer_zero, layer_one,
+        "the sampled layer must select the uploaded contents"
+    );
 }

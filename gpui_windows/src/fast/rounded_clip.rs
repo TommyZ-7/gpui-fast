@@ -255,6 +255,7 @@ pub(crate) fn draw_group(
             device: target.device,
             device_context: context,
             atlas: target.atlas,
+            texture_arrays: target.texture_arrays,
             globals: target.globals,
             paths: Some(PathTargets {
                 render_target_view: &parent_view,

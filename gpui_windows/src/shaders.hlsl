@@ -1266,3 +1266,60 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     color.a *= sprite.opacity * saturate(0.5 - distance);
     return color;
 }
+
+/*
+**
+**              Polychrome array sprites (BC7 Texture2DArray)
+**
+*/
+
+Texture2DArray<float4> t_sprite_array : register(t2);
+
+float2 to_tile_position_array(float2 unit_vertex, AtlasTile tile) {
+    uint width = 0;
+    uint height = 0;
+    uint elements = 0;
+    uint levels = 0;
+    t_sprite_array.GetDimensions(width, height, elements, levels);
+    return (float2(tile.bounds.origin) + unit_vertex * float2(tile.bounds.size))
+        / float2(width, height);
+}
+
+PolychromeSpriteVertexOutput polychrome_array_sprite_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    uint sprite_id = batch_start_index + instance_id;
+    PolychromeSprite sprite = poly_sprites[sprite_id];
+    float4 device_position = to_device_position(unit_vertex, sprite.bounds);
+    float4 clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds,
+                                                    sprite.content_mask);
+    float2 tile_position = to_tile_position_array(unit_vertex, sprite.tile);
+
+    PolychromeSpriteVertexOutput output;
+    output.position = device_position;
+    output.tile_position = tile_position;
+    output.sprite_id = sprite_id;
+    output.clip_distance = clip_distance;
+    return output;
+}
+
+float2 rotate_array_uv(float2 uv, uint rotation) {
+    if (rotation == 1u) {
+        return float2(1.0f - uv.y, uv.x);
+    }
+    return uv;
+}
+
+float4 polychrome_array_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Target {
+    PolychromeSprite sprite = poly_sprites[input.sprite_id];
+    float2 uv = rotate_array_uv(input.tile_position, sprite.tile.padding);
+    float4 sample = t_sprite_array.Sample(s_sprite, float3(uv, float(sprite.tile.tile_id)));
+    float distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
+
+    float4 color = sample;
+    if (sprite.grayscale != 0u) {
+        float3 grayscale = dot(color.rgb, GRAYSCALE_FACTORS);
+        color = float4(grayscale, sample.a);
+    }
+    color.a *= sprite.opacity * saturate(0.5f - distance);
+    return color;
+}

@@ -43,6 +43,7 @@ pub(crate) struct DirectXRenderer {
     pub(crate) resources: Option<DirectXResources>,
     pub(crate) globals: DirectXGlobalElements,
     pub(crate) pipelines: DirectXRenderPipelines,
+    pub(crate) texture_arrays: Arc<crate::fast::texture_arrays::TextureArrayStore>,
     pub(crate) direct_composition: Option<DirectComposition>,
     font_info: &'static FontInfo,
 
@@ -95,6 +96,7 @@ pub(crate) struct DirectXRenderPipelines {
     pub(crate) mono_sprites: PipelineState<MonochromeSprite>,
     pub(crate) subpixel_sprites: PipelineState<SubpixelSprite>,
     pub(crate) poly_sprites: PipelineState<PolychromeSprite>,
+    pub(crate) poly_array_sprites: PipelineState<PolychromeSprite>,
 }
 
 pub(crate) struct DirectXGlobalElements {
@@ -166,6 +168,11 @@ impl DirectXRenderer {
         let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
             .context("Creating DirectX devices")?;
         let atlas = Arc::new(DirectXAtlas::new(&devices.device, &devices.device_context));
+        let texture_arrays = crate::fast::texture_arrays::TextureArrayStore::new(
+            devices.device.clone(),
+            devices.device_context.clone(),
+        );
+        gpui::set_texture_array_platform(texture_arrays.clone());
 
         let resources = DirectXResources::new(&devices, 1, 1, hwnd, disable_direct_composition)
             .context("Creating DirectX resources")?;
@@ -192,6 +199,7 @@ impl DirectXRenderer {
             resources: Some(resources),
             globals,
             pipelines,
+            texture_arrays,
             direct_composition,
             font_info: Self::get_font_info(),
             width: 1,
@@ -815,6 +823,23 @@ impl DirectXRenderer {
             return Ok(());
         }
         let devices = self.devices.as_ref().context("devices missing")?;
+        if let Some(array_id) = TextureArrayId::from_atlas_texture_id(texture_id) {
+            let Some(view) = self.texture_arrays.view(array_id) else {
+                return Ok(());
+            };
+            return self.pipelines.poly_array_sprites.draw_range_with_texture_slot(
+                &devices.device_context,
+                &[Some(view)],
+                self.globals
+                    .batch_params_buffer
+                    .as_ref()
+                    .context("batch params buffer missing")?,
+                slice::from_ref(&self.globals.sampler),
+                start as u32,
+                len as u32,
+                2,
+            );
+        }
         let Some(texture_view) = self.atlas.get_texture_view(texture_id) else {
             return Ok(());
         };
@@ -1015,6 +1040,13 @@ impl DirectXRenderPipelines {
             16,
             create_blend_state(device)?,
         )?;
+        let poly_array_sprites = PipelineState::new(
+            device,
+            "polychrome_array_sprite_pipeline",
+            ShaderModule::PolychromeArraySprite,
+            16,
+            create_blend_state(device)?,
+        )?;
 
         Ok(Self {
             shadow_pipeline,
@@ -1025,6 +1057,7 @@ impl DirectXRenderPipelines {
             mono_sprites,
             subpixel_sprites,
             poly_sprites,
+            poly_array_sprites,
         })
     }
 }
@@ -1260,6 +1293,31 @@ impl<T> PipelineState<T> {
         first_instance: u32,
         instance_count: u32,
     ) -> Result<()> {
+        self.draw_range_with_texture_slot(
+            device_context,
+            texture,
+            batch_params_buffer,
+            sampler,
+            first_instance,
+            instance_count,
+            0,
+        )
+    }
+
+    /// Draws like [`Self::draw_range_with_texture`] but binds the SRV at
+    /// `slot`. The texture-array entry points declare their array at t2 so
+    /// the ordinary sprite declarations stay untouched.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_range_with_texture_slot(
+        &self,
+        device_context: &ID3D11DeviceContext,
+        texture: &[Option<ID3D11ShaderResourceView>],
+        batch_params_buffer: &ID3D11Buffer,
+        sampler: &[Option<ID3D11SamplerState>],
+        first_instance: u32,
+        instance_count: u32,
+        slot: u32,
+    ) -> Result<()> {
         anyhow::ensure!(
             first_instance as usize + instance_count as usize <= self.buffer_size,
             "DirectX instance range exceeds the {} buffer",
@@ -1276,8 +1334,8 @@ impl<T> PipelineState<T> {
         );
         unsafe {
             device_context.PSSetSamplers(0, Some(sampler));
-            device_context.VSSetShaderResources(0, Some(texture));
-            device_context.PSSetShaderResources(0, Some(texture));
+            device_context.VSSetShaderResources(slot, Some(texture));
+            device_context.PSSetShaderResources(slot, Some(texture));
             device_context.DrawInstanced(4, instance_count, 0, 0);
         }
         Ok(())
@@ -1734,6 +1792,7 @@ pub(crate) mod shader_resources {
         MonochromeSprite,
         SubpixelSprite,
         PolychromeSprite,
+        PolychromeArraySprite,
     }
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1806,6 +1865,10 @@ pub(crate) mod shader_resources {
                 ShaderModule::PolychromeSprite => match target {
                     ShaderTarget::Vertex => POLYCHROME_SPRITE_VERTEX_BYTES,
                     ShaderTarget::Fragment => POLYCHROME_SPRITE_FRAGMENT_BYTES,
+                },
+                ShaderModule::PolychromeArraySprite => match target {
+                    ShaderTarget::Vertex => POLYCHROME_ARRAY_SPRITE_VERTEX_BYTES,
+                    ShaderTarget::Fragment => POLYCHROME_ARRAY_SPRITE_FRAGMENT_BYTES,
                 },
             };
             Self { inner: bytes }
@@ -1888,6 +1951,7 @@ pub(crate) mod shader_resources {
                 ShaderModule::MonochromeSprite => "monochrome_sprite",
                 ShaderModule::SubpixelSprite => "subpixel_sprite",
                 ShaderModule::PolychromeSprite => "polychrome_sprite",
+                ShaderModule::PolychromeArraySprite => "polychrome_array_sprite",
             }
         }
     }

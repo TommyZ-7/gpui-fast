@@ -254,6 +254,7 @@ pub(crate) fn shader(source: &str) -> String {
         "fs_underline",
         "fs_mono_sprite",
         "fs_poly_sprite",
+        "fs_poly_array_sprite",
         "fs_surface",
         "fs_subpixel_sprite",
     ] {

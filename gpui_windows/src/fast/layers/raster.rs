@@ -36,6 +36,7 @@ pub(crate) fn rasterize_tiles(renderer: &mut DirectXRenderer, scene: &Scene) -> 
         device: &devices.device,
         device_context: &devices.device_context,
         atlas: &renderer.atlas,
+        texture_arrays: &renderer.texture_arrays,
         globals: &renderer.globals,
         paths: None,
     };
