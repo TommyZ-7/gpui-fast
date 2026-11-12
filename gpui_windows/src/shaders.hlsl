@@ -1279,8 +1279,7 @@ float2 to_tile_position_array(float2 unit_vertex, AtlasTile tile) {
     uint width = 0;
     uint height = 0;
     uint elements = 0;
-    uint levels = 0;
-    t_sprite_array.GetDimensions(width, height, elements, levels);
+    t_sprite_array.GetDimensions(width, height, elements);
     return (float2(tile.bounds.origin) + unit_vertex * float2(tile.bounds.size))
         / float2(width, height);
 }
