@@ -141,12 +141,7 @@ pub(crate) fn upload(
         pipeline.update_buffer(device, context, &scene.subpixel_sprites)?;
     }
     if !scene.polychrome_sprites.is_empty() {
-        pipelines
-            .poly_sprites
-            .update_buffer(device, context, &scene.polychrome_sprites)?;
-        pipelines
-            .poly_array_sprites
-            .update_buffer(device, context, &scene.polychrome_sprites)?;
+        pipelines.update_polychrome_sprites(device, context, &scene.polychrome_sprites)?;
     }
     Ok(())
 }

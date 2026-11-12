@@ -596,7 +596,7 @@ impl DirectXRenderer {
         }
 
         if !scene.polychrome_sprites.is_empty() {
-            self.pipelines.poly_sprites.update_buffer(
+            self.pipelines.update_polychrome_sprites(
                 &devices.device,
                 &devices.device_context,
                 &scene.polychrome_sprites,
@@ -1040,13 +1040,17 @@ impl DirectXRenderPipelines {
             16,
             create_blend_state(device)?,
         )?;
-        let poly_array_sprites = PipelineState::new(
+        let mut poly_array_sprites = PipelineState::new(
             device,
             "polychrome_array_sprite_pipeline",
             ShaderModule::PolychromeArraySprite,
             16,
             create_blend_state(device)?,
         )?;
+        // Both polychrome pipelines draw the same instances and only differ in
+        // the texture they sample, so share one instance buffer instead of
+        // uploading the frame's sprites to each of them.
+        poly_array_sprites.share_instance_buffer(&poly_sprites);
 
         Ok(Self {
             shadow_pipeline,
@@ -1059,6 +1063,22 @@ impl DirectXRenderPipelines {
             poly_sprites,
             poly_array_sprites,
         })
+    }
+
+    /// Uploads polychrome sprites once for both pipelines that draw them.
+    /// [`Self::poly_array_sprites`] shares [`Self::poly_sprites`]'s buffer,
+    /// so a frame writes the sprites to the GPU only once.
+    pub(crate) fn update_polychrome_sprites(
+        &mut self,
+        device: &ID3D11Device,
+        device_context: &ID3D11DeviceContext,
+        sprites: &[PolychromeSprite],
+    ) -> Result<()> {
+        self.poly_sprites
+            .update_buffer(device, device_context, sprites)?;
+        self.poly_array_sprites
+            .share_instance_buffer(&self.poly_sprites);
+        Ok(())
     }
 }
 
@@ -1209,6 +1229,16 @@ impl<T> PipelineState<T> {
             self.buffer_size = new_buffer_size;
         }
         update_buffer(device_context, &self.buffer, data)
+    }
+
+    /// Makes `self` draw from `source`'s instance buffer. Pipelines that draw
+    /// the same instance type with different shaders share one buffer so the
+    /// frame uploads its instances once. Callers re-share after growing
+    /// `source` through [`Self::update_buffer`].
+    fn share_instance_buffer(&mut self, source: &Self) {
+        self.buffer = source.buffer.clone();
+        self.view = source.view.clone();
+        self.buffer_size = source.buffer_size;
     }
 
     fn draw(
