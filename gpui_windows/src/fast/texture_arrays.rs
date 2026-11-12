@@ -11,9 +11,10 @@ use parking_lot::Mutex;
 use windows::Win32::Graphics::{
     Direct3D::D3D11_SRV_DIMENSION_TEXTURE2DARRAY,
     Direct3D11::{
-        D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_FORMAT_SUPPORT_TEXTURE2D,
-        D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_TEX2D_ARRAY_SRV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Device,
-        ID3D11DeviceContext, ID3D11ShaderResourceView, ID3D11Texture2D,
+        D3D11_BIND_SHADER_RESOURCE, D3D11_FORMAT_SUPPORT_TEXTURE2D,
+        D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_TEX2D_ARRAY_SRV, D3D11_TEXTURE2D_DESC,
+        D3D11_USAGE_DEFAULT, ID3D11Device, ID3D11DeviceContext, ID3D11ShaderResourceView,
+        ID3D11Texture2D,
     },
     Dxgi::Common::{DXGI_FORMAT_BC7_UNORM, DXGI_SAMPLE_DESC},
 };
@@ -139,20 +140,16 @@ impl TextureArrayPlatform for TextureArrayStore {
             blocks.len() >= depth_pitch as usize,
             "texture array layer is shorter than its dimensions"
         );
-        let destination = D3D11_BOX {
-            left: 0,
-            top: 0,
-            front: layer,
-            right: desc.Width,
-            bottom: desc.Height,
-            back: layer + 1,
-        };
         unsafe {
+            // `layer` already selects the array slice through DstSubresource.
+            // The optional box is relative to that subresource, whose depth is
+            // one, so passing a box would have to keep front=0/back=1. Passing
+            // `None` updates the whole slice and avoids that trap.
             self.context.UpdateSubresource(
                 &array.texture,
                 layer,
-                Some(&destination),
-                blocks.as_ptr() as *const _,
+                None,
+                blocks.as_ptr().cast(),
                 row_pitch,
                 depth_pitch,
             );
@@ -162,5 +159,85 @@ impl TextureArrayPlatform for TextureArrayStore {
 
     fn remove_texture(&self, id: TextureArrayId) {
         self.arrays.lock().remove(&id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::directx_devices::DirectXDevices;
+    use gpui::{AtlasTextureId, AtlasTextureKind, size};
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_USAGE_STAGING,
+    };
+
+    #[test]
+    fn uploads_each_layer_to_its_own_slice() {
+        let Ok(devices) = DirectXDevices::new() else {
+            return;
+        };
+        let store = TextureArrayStore::new(devices.device.clone(), devices.device_context.clone());
+        let id = TextureArrayId::from_atlas_texture_id(AtlasTextureId {
+            index: 0xD000_0000 + 1,
+            kind: AtlasTextureKind::Polychrome,
+        })
+        .expect("array id");
+        let array_size = size(DevicePixels(4), DevicePixels(4));
+        if store
+            .create_texture(id, array_size, 2, TextureArrayFormat::Bc7RgbaUnorm)
+            .is_err()
+        {
+            return;
+        }
+        let zero = [0u8; 16];
+        let ones = [0xffu8; 16];
+        store.upload_layer(id, 0, &zero).expect("layer 0 upload");
+        store.upload_layer(id, 1, &ones).expect("layer 1 upload");
+
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: 4,
+            Height: 4,
+            MipLevels: 1,
+            ArraySize: 2,
+            Format: DXGI_FORMAT_BC7_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        let mut staging: Option<ID3D11Texture2D> = None;
+        unsafe {
+            devices
+                .device
+                .CreateTexture2D(&desc, None, Some(&mut staging))
+                .expect("create staging texture");
+        }
+        let staging = staging.expect("staging texture");
+        {
+            let arrays = store.arrays.lock();
+            let array = arrays.get(&id).expect("array");
+            unsafe {
+                devices
+                    .device_context
+                    .CopyResource(&staging, &array.texture);
+            }
+        }
+
+        for (layer, expected) in [(0, zero), (1, ones)] {
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            unsafe {
+                devices
+                    .device_context
+                    .Map(&staging, layer, D3D11_MAP_READ, 0, Some(&mut mapped))
+                    .expect("map staging layer");
+                let bytes = std::slice::from_raw_parts(mapped.pData.cast::<u8>(), 16);
+                assert_eq!(bytes, expected.as_slice(), "layer {layer} kept its upload");
+                devices.device_context.Unmap(&staging, layer);
+            }
+        }
     }
 }

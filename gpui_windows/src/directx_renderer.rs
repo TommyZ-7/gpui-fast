@@ -136,6 +136,7 @@ impl DirectXRendererDevices {
             dxgi_factory,
             device,
             device_context,
+            ..
         } = directx_devices;
         let dxgi_device = if disable_direct_composition {
             None
@@ -168,11 +169,7 @@ impl DirectXRenderer {
         let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
             .context("Creating DirectX devices")?;
         let atlas = Arc::new(DirectXAtlas::new(&devices.device, &devices.device_context));
-        let texture_arrays = crate::fast::texture_arrays::TextureArrayStore::new(
-            devices.device.clone(),
-            devices.device_context.clone(),
-        );
-        gpui::set_texture_array_platform(texture_arrays.clone());
+        let texture_arrays = directx_devices.texture_arrays.clone();
 
         let resources = DirectXResources::new(&devices, 1, 1, hwnd, disable_direct_composition)
             .context("Creating DirectX resources")?;
@@ -339,6 +336,7 @@ impl DirectXRenderer {
         }
         self.devices = Some(devices);
         self.resources = Some(resources);
+        self.texture_arrays = directx_devices.texture_arrays.clone();
         self.globals = globals;
         self.pipelines = pipelines;
         self.direct_composition = direct_composition;
@@ -827,18 +825,21 @@ impl DirectXRenderer {
             let Some(view) = self.texture_arrays.view(array_id) else {
                 return Ok(());
             };
-            return self.pipelines.poly_array_sprites.draw_range_with_texture_slot(
-                &devices.device_context,
-                &[Some(view)],
-                self.globals
-                    .batch_params_buffer
-                    .as_ref()
-                    .context("batch params buffer missing")?,
-                slice::from_ref(&self.globals.sampler),
-                start as u32,
-                len as u32,
-                2,
-            );
+            return self
+                .pipelines
+                .poly_array_sprites
+                .draw_range_with_texture_slot(
+                    &devices.device_context,
+                    &[Some(view)],
+                    self.globals
+                        .batch_params_buffer
+                        .as_ref()
+                        .context("batch params buffer missing")?,
+                    slice::from_ref(&self.globals.sampler),
+                    start as u32,
+                    len as u32,
+                    2,
+                );
         }
         let Some(texture_view) = self.atlas.get_texture_view(texture_id) else {
             return Ok(());

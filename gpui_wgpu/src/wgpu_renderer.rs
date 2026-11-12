@@ -534,6 +534,7 @@ impl WgpuRendererCore {
     pub(crate) fn create_bind_group_layouts(
         device: &wgpu::Device,
         uses_webgl_instance_data: bool,
+        texture_array: wgpu::BindGroupLayout,
     ) -> WgpuBindGroupLayouts {
         let globals =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -599,28 +600,6 @@ impl WgpuRendererCore {
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-
-        let texture_array = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("texture_array_layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
                     count: None,
@@ -980,11 +959,10 @@ impl WgpuRendererCore {
         let poly_array_sprites = if uses_webgl_instance_data {
             None
         } else {
-            let array_shader_module =
-                device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("gpui_poly_array_shaders"),
-                    source: crate::fast::rounded_clip::shader_source(POLY_ARRAY_SHADERS),
-                });
+            let array_shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("gpui_poly_array_shaders"),
+                source: crate::fast::rounded_clip::shader_source(POLY_ARRAY_SHADERS),
+            });
             Some(create_pipeline(
                 "poly_array_sprites",
                 "vs_poly_array_sprite",
@@ -1311,7 +1289,12 @@ impl WgpuRendererCore {
         let uses_webgl_instance_data = context.uses_webgl_instance_data();
         let dual_source_blending =
             context.supports_dual_source_blending() && !uses_webgl_instance_data;
-        let bind_group_layouts = Self::create_bind_group_layouts(&device, uses_webgl_instance_data);
+        let texture_arrays = Arc::clone(&context.fast_texture_arrays);
+        let bind_group_layouts = Self::create_bind_group_layouts(
+            &device,
+            uses_webgl_instance_data,
+            texture_arrays.layout(),
+        );
         let pipelines = Self::create_pipelines(
             &device,
             &bind_group_layouts,
@@ -1327,12 +1310,6 @@ impl WgpuRendererCore {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let texture_arrays = crate::fast::texture_arrays::init(
-            Arc::clone(&device),
-            Arc::clone(&queue),
-            bind_group_layouts.texture_array.clone(),
-            atlas_sampler.clone(),
-        );
         let uniform_alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
         let globals_size = std::mem::size_of::<GlobalParams>() as u64;
         let gamma_size = std::mem::size_of::<GammaParams>() as u64;

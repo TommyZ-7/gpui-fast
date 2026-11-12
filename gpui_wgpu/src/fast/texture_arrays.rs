@@ -26,6 +26,39 @@ pub(crate) struct TextureArrayStore {
     arrays: Mutex<HashMap<TextureArrayId, GpuArray>>,
 }
 
+pub(crate) fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("texture_array_layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+pub(crate) fn sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("texture_array_sampler"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    })
+}
+
 impl TextureArrayStore {
     pub(crate) fn new(
         device: Arc<wgpu::Device>,
@@ -40,6 +73,11 @@ impl TextureArrayStore {
             sampler,
             arrays: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The layout every array pipeline must use for its bind group.
+    pub(crate) fn layout(&self) -> wgpu::BindGroupLayout {
+        self.layout.clone()
     }
 
     /// The bind group used to sample `id`, if the array is still alive.
@@ -181,15 +219,24 @@ impl TextureArrayPlatform for TextureArrayStore {
     }
 }
 
-/// Installs the array store as the process-wide upload backend.
+/// Creates the store owned by one `WgpuContext` and installs it as the
+/// process-wide upload backend.
+///
+/// A context and its store are replaced together when the device is lost, so
+/// this uses the replace path rather than first-wins installation.
 pub(crate) fn init(
-    device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
-    layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    install_platform: bool,
 ) -> Arc<TextureArrayStore> {
-    let store = TextureArrayStore::new(device, queue, layout, sampler);
-    gpui::set_texture_array_platform(store.clone());
+    let store = TextureArrayStore::new(
+        Arc::clone(device),
+        Arc::clone(queue),
+        bind_group_layout(device),
+        sampler(device),
+    );
+    if install_platform {
+        gpui::replace_texture_array_platform(store.clone());
+    }
     store
 }
-

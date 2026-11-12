@@ -13,6 +13,7 @@ use wgpu::TextureFormat;
 #[derive(Clone)]
 pub struct WgpuContext {
     pub(crate) fast_dynamic_textures: crate::fast::dynamic_textures::TextureStore,
+    pub(crate) fast_texture_arrays: Arc<crate::fast::texture_arrays::TextureArrayStore>,
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
     pub device: Arc<wgpu::Device>,
@@ -180,6 +181,7 @@ impl WgpuContext {
             queue,
             dual_source_blending,
             color_texture_format,
+            true,
         ))
     }
 
@@ -266,6 +268,7 @@ impl WgpuContext {
                 queue,
                 dual_source_blending,
                 color_texture_format,
+                false,
             ),
             target_format,
         ))
@@ -302,6 +305,7 @@ impl WgpuContext {
         queue: wgpu::Queue,
         dual_source_blending: bool,
         color_texture_format: TextureFormat,
+        install_texture_array_platform: bool,
     ) -> Self {
         let errors = DeviceErrorState::install(&device);
 
@@ -311,17 +315,22 @@ impl WgpuContext {
             adapter.get_info().backend
         );
         let backend = WgpuBackend::Native(adapter.get_info().backend);
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+        let fast_texture_arrays =
+            crate::fast::texture_arrays::init(&device, &queue, install_texture_array_platform);
 
         Self {
             instance,
             adapter,
-            device: Arc::new(device),
-            queue: Arc::new(queue),
+            device,
+            queue,
             backend,
             dual_source_blending,
             color_texture_format,
             errors,
             fast_dynamic_textures: crate::fast::dynamic_textures::TextureStore::default(),
+            fast_texture_arrays,
         }
     }
 
@@ -412,16 +421,20 @@ impl WgpuContext {
             device.limits(),
         );
 
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+        let fast_texture_arrays = crate::fast::texture_arrays::init(&device, &queue, true);
         let context = Self {
             instance,
             adapter,
-            device: Arc::new(device),
-            queue: Arc::new(queue),
+            device,
+            queue,
             backend,
             dual_source_blending,
             color_texture_format,
             errors,
             fast_dynamic_textures: crate::fast::dynamic_textures::TextureStore::default(),
+            fast_texture_arrays,
         };
         Ok(PreparedWebGraphics { context, surface })
     }
