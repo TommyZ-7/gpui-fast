@@ -72,6 +72,7 @@ pub(crate) struct FrameState {
 /// the on-screen renderer, or the pixel tests' surfaceless harness.
 pub(crate) struct FrameTarget<'a> {
     pub(crate) dynamic_textures: &'a crate::fast::dynamic_textures::TextureStore,
+    pub(crate) texture_arrays: &'a crate::fast::texture_arrays::TextureArrayStore,
     pub(crate) device: &'a wgpu::Device,
     pub(crate) queue: &'a wgpu::Queue,
     pub(crate) pipelines: &'a WgpuPipelines,
@@ -141,6 +142,7 @@ impl FrameHost for WgpuRendererCore {
         };
         Ok(FrameTarget {
             dynamic_textures: &self.fast_dynamic_textures,
+            texture_arrays: &resources.texture_arrays,
             device: &resources.device,
             queue: &resources.queue,
             pipelines: &resources.pipelines,
@@ -918,6 +920,28 @@ pub(crate) fn draw_scene(
                         .unwrap_or(&pipelines.mono_sprites),
                     &upload.subpixel_sprites,
                     Some(&texture),
+                    range,
+                );
+            }
+            PrimitiveBatch::PolychromeSprites { texture_id, range }
+                if gpui::TextureArrayId::from_atlas_texture_id(texture_id).is_some() =>
+            {
+                let Some(array_id) = gpui::TextureArrayId::from_atlas_texture_id(texture_id) else {
+                    continue;
+                };
+                let Some(pipeline) = pipelines.poly_array_sprites.as_ref() else {
+                    continue;
+                };
+                let Some(bind_group) = target.texture_arrays.bind_group(array_id) else {
+                    continue;
+                };
+                draw_batch(
+                    &mut pass,
+                    &mut bound,
+                    draw.globals,
+                    pipeline,
+                    &upload.polychrome_sprites,
+                    Some(&bind_group),
                     range,
                 );
             }

@@ -31,6 +31,7 @@ pub fn source(original: &str, alpha: &str) -> String {
         "underline_fragment",
         "monochrome_sprite_fragment",
         "polychrome_sprite_fragment",
+        "polychrome_array_sprite_fragment",
         "path_sprite_fragment",
         "subpixel_sprite_fragment",
     ] {

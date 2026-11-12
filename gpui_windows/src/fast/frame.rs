@@ -49,6 +49,7 @@ pub(crate) struct Target<'a> {
     pub(crate) device: &'a ID3D11Device,
     pub(crate) device_context: &'a ID3D11DeviceContext,
     pub(crate) atlas: &'a DirectXAtlas,
+    pub(crate) texture_arrays: &'a crate::fast::texture_arrays::TextureArrayStore,
     pub(crate) globals: &'a DirectXGlobalElements,
     /// What the frame's paths are drawn through; `None` for targets that
     /// never draw paths.
@@ -98,6 +99,7 @@ pub(crate) fn draw_batches(renderer: &mut DirectXRenderer, scene: &Scene) -> Res
         device: &devices.device,
         device_context: &devices.device_context,
         atlas: &renderer.atlas,
+        texture_arrays: &renderer.texture_arrays,
         globals: &renderer.globals,
         paths: Some(PathTargets::of(resources)),
     };
@@ -139,8 +141,12 @@ pub(crate) fn upload(
         pipeline.update_buffer(device, context, &scene.subpixel_sprites)?;
     }
     if !scene.polychrome_sprites.is_empty() {
-        let pipeline = &mut pipelines.poly_sprites;
-        pipeline.update_buffer(device, context, &scene.polychrome_sprites)?;
+        pipelines
+            .poly_sprites
+            .update_buffer(device, context, &scene.polychrome_sprites)?;
+        pipelines
+            .poly_array_sprites
+            .update_buffer(device, context, &scene.polychrome_sprites)?;
     }
     Ok(())
 }
@@ -271,6 +277,18 @@ pub(crate) fn draw_scene_masked(
                 draw.instances(pipeline, range.start, range.len(), Some(&view))
             }
             PrimitiveBatch::PolychromeSprites { texture_id, range }
+                if gpui::TextureArrayId::from_atlas_texture_id(texture_id).is_some() =>
+            {
+                let Some(array_id) = gpui::TextureArrayId::from_atlas_texture_id(texture_id) else {
+                    continue;
+                };
+                let Some(view) = target.texture_arrays.view(array_id) else {
+                    continue;
+                };
+                let pipeline = &pipelines.poly_array_sprites;
+                draw.instances_array(pipeline, range.start, range.len(), &Some(view))
+            }
+            PrimitiveBatch::PolychromeSprites { texture_id, range }
                 if composite::is_layer_texture(texture_id) =>
             {
                 let sprites = &scene.polychrome_sprites;
@@ -338,6 +356,37 @@ impl Draw<'_> {
             self.state.set_texture(context, texture, self.sampler);
         }
         unsafe { context.DrawInstanced(4, instance_count as u32, 0, 0) };
+        Ok(())
+    }
+
+    /// Draws texture-array sprites, binding the array SRV at t2 as the array
+    /// entry points declare it.
+    fn instances_array<T>(
+        &mut self,
+        pipeline: &PipelineState<T>,
+        first_instance: usize,
+        instance_count: usize,
+        texture: &Option<ID3D11ShaderResourceView>,
+    ) -> Result<()> {
+        if instance_count == 0 {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            first_instance + instance_count <= pipeline.buffer_size,
+            "DirectX instance range exceeds the {} buffer",
+            pipeline.label
+        );
+        let context = self.device_context;
+        self.state
+            .set_batch_start(context, self.batch_params, first_instance as u32)?;
+        self.state
+            .set_pipeline(context, pipeline, D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        unsafe {
+            context.PSSetSamplers(0, Some(slice::from_ref(self.sampler)));
+            context.PSSetShaderResources(2, Some(slice::from_ref(texture)));
+            context.VSSetShaderResources(2, Some(slice::from_ref(texture)));
+            context.DrawInstanced(4, instance_count as u32, 0, 0);
+        }
         Ok(())
     }
 }

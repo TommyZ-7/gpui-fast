@@ -434,6 +434,12 @@ impl WgpuContext {
             .contains(wgpu::Features::DUAL_SOURCE_BLENDING);
 
         let mut required_features = wgpu::Features::empty();
+        if adapter
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+        {
+            required_features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
+        }
         if dual_source_blending {
             required_features |= wgpu::Features::DUAL_SOURCE_BLENDING;
         } else {
@@ -458,6 +464,13 @@ impl WgpuContext {
         let required_limits = wgpu::Limits::downlevel_defaults()
             .using_resolution(adapter.limits())
             .using_alignment(adapter.limits());
+        // The thumbnail cache uses a fixed 512-layer array. Raise the limit
+        // when the adapter can provide it; the texture-array store reports a
+        // clear error when the adapter cannot.
+        let mut required_limits = required_limits;
+        if adapter.limits().max_texture_array_layers >= 512 {
+            required_limits.max_texture_array_layers = 512;
+        }
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {

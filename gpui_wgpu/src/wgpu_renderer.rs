@@ -45,6 +45,10 @@ const SUBPIXEL_SHADERS: &str = concat!(
     include_str!("shaders_subpixel.wgsl"),
 );
 
+/// Native-only texture-array sprite pipeline. WebGL has no compressed array
+/// textures and falls back to no array pipeline.
+const POLY_ARRAY_SHADERS: &str = include_str!("shaders_poly_array.wgsl");
+
 fn least_common_multiple(left: u64, right: u64) -> u64 {
     let mut first = left;
     let mut second = right;
@@ -133,6 +137,7 @@ pub(crate) struct WgpuPipelines {
     pub(crate) mono_sprites: wgpu::RenderPipeline,
     pub(crate) subpixel_sprites: Option<wgpu::RenderPipeline>,
     pub(crate) poly_sprites: wgpu::RenderPipeline,
+    pub(crate) poly_array_sprites: Option<wgpu::RenderPipeline>,
     #[allow(dead_code)]
     surfaces: wgpu::RenderPipeline,
 }
@@ -162,6 +167,7 @@ pub(crate) struct WgpuBindGroupLayouts {
     pub(crate) globals: wgpu::BindGroupLayout,
     pub(crate) instances: wgpu::BindGroupLayout,
     pub(crate) texture: wgpu::BindGroupLayout,
+    pub(crate) texture_array: wgpu::BindGroupLayout,
     surfaces: wgpu::BindGroupLayout,
 }
 
@@ -187,6 +193,7 @@ pub(crate) struct WgpuResources {
     pub(crate) pipelines: WgpuPipelines,
     pub(crate) bind_group_layouts: WgpuBindGroupLayouts,
     pub(crate) atlas_sampler: wgpu::Sampler,
+    pub(crate) texture_arrays: Arc<crate::fast::texture_arrays::TextureArrayStore>,
     atlas_texture_bind_groups: FxHashMap<AtlasTextureId, CachedTextureBindGroup>,
     pub(crate) globals_buffer: wgpu::Buffer,
     pub(crate) globals_bind_group: wgpu::BindGroup,
@@ -605,6 +612,28 @@ impl WgpuRendererCore {
             ],
         });
 
+        let texture_array = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("texture_array_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
         let surfaces = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("surfaces_layout"),
             entries: &[
@@ -654,6 +683,7 @@ impl WgpuRendererCore {
             globals,
             instances,
             texture,
+            texture_array,
             surfaces,
         }
     }
@@ -947,6 +977,28 @@ impl WgpuRendererCore {
             &shader_module,
         );
 
+        let poly_array_sprites = if uses_webgl_instance_data {
+            None
+        } else {
+            let array_shader_module =
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("gpui_poly_array_shaders"),
+                    source: crate::fast::rounded_clip::shader_source(POLY_ARRAY_SHADERS),
+                });
+            Some(create_pipeline(
+                "poly_array_sprites",
+                "vs_poly_array_sprite",
+                "fs_poly_array_sprite",
+                &layouts.globals,
+                &layouts.instances,
+                Some(&layouts.texture_array),
+                wgpu::PrimitiveTopology::TriangleStrip,
+                &[Some(color_target.clone())],
+                1,
+                &array_shader_module,
+            ))
+        };
+
         let surfaces = create_pipeline(
             "surfaces",
             "vs_surface",
@@ -969,6 +1021,7 @@ impl WgpuRendererCore {
             mono_sprites,
             subpixel_sprites,
             poly_sprites,
+            poly_array_sprites,
             surfaces,
         }
     }
@@ -1274,6 +1327,12 @@ impl WgpuRendererCore {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let texture_arrays = crate::fast::texture_arrays::init(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            bind_group_layouts.texture_array.clone(),
+            atlas_sampler.clone(),
+        );
         let uniform_alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
         let globals_size = std::mem::size_of::<GlobalParams>() as u64;
         let gamma_size = std::mem::size_of::<GammaParams>() as u64;
@@ -1377,6 +1436,7 @@ impl WgpuRendererCore {
                 pipelines,
                 bind_group_layouts,
                 atlas_sampler,
+                texture_arrays,
                 atlas_texture_bind_groups: FxHashMap::default(),
                 globals_buffer,
                 globals_bind_group,

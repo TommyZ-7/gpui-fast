@@ -132,6 +132,10 @@ pub use fast::composition::{
 pub use fast::dynamic_textures::{
     DynamicTexture, DynamicTextureId, DynamicTexturePlatform, set_dynamic_texture_platform,
 };
+pub use fast::texture_arrays::{
+    TextureArray, TextureArrayFormat, TextureArrayId, TextureArrayPlatform, TextureArrayUv,
+    set_texture_array_platform,
+};
 pub use fast::layers::scene::{
     LAYER_TILE_TEXTURE_BASE, LayerContent, LayerFrame, LayerKey, SceneLayers, TileCoord,
     decode_layer_tile, layer_tile_id, layer_tile_texture_id,
