@@ -1279,3 +1279,77 @@ fn texture_array_layers_sample_their_own_contents() {
         "the sampled layer must select the uploaded contents"
     );
 }
+
+
+const ROTATION_FIXTURE: [u8; 64] = [
+    48, 255, 3, 0, 192, 255, 175, 170, 170, 170, 74, 146, 36, 73, 146, 36, 48, 255, 255, 15, 0, 0,
+    172, 170, 170, 170, 74, 146, 36, 73, 146, 36, 48, 255, 3, 240, 63, 0, 172, 170, 170, 170, 74,
+    146, 36, 73, 146, 36, 225, 255, 255, 255, 255, 255, 255, 255, 255, 255, 47, 41, 73, 146, 36,
+    73,
+];
+
+#[test]
+fn texture_array_rotation_restores_the_display_orientation() {
+    fn render(padding: u32) -> Vec<u8> {
+        let Some(mut harness) = Harness::new() else {
+            return Vec::new();
+        };
+        let id = TextureArrayId::from_atlas_texture_id(AtlasTextureId {
+            index: 0xD000_0000 + 4_243,
+            kind: AtlasTextureKind::Polychrome,
+        })
+        .expect("array id");
+        let array_size = device_size(8, 8);
+        if harness
+            .texture_arrays
+            .create_texture(id, array_size, 1, TextureArrayFormat::Bc7RgbaUnorm)
+            .is_err()
+        {
+            return Vec::new();
+        }
+        harness
+            .texture_arrays
+            .upload_layer(id, 0, &ROTATION_FIXTURE)
+            .expect("layer");
+        let mut scene = Scene::default();
+        scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: 1,
+            grayscale: false.into(),
+            opacity: 1.,
+            bounds: sp(0., 0., 32., 32.),
+            content_mask: no_mask(),
+            corner_radii: Corners::default(),
+            tile: AtlasTile {
+                texture_id: id.atlas_texture_id(),
+                tile_id: TileId(0),
+                padding,
+                bounds: Bounds {
+                    origin: point(DevicePixels(0), DevicePixels(0)),
+                    size: array_size,
+                },
+            },
+        });
+        harness.render(
+            &scene,
+            gpui::size(DevicePixels(32), DevicePixels(32)),
+            Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 255.0,
+            },
+        )
+    }
+
+    let normal = render(0);
+    let rotated = render(1);
+    if normal.is_empty() || rotated.is_empty() {
+        return;
+    }
+    let normal = pixel(&normal, 32, 8, 8);
+    let rotated = pixel(&rotated, 32, 8, 8);
+    println!("normal={normal:?} rotated={rotated:?}");
+    assert!(normal[0] > 128 && normal[1] < 128, "normal top-left is red: {normal:?}");
+    assert!(rotated[1] > 128 && rotated[0] < 128, "rotated top-left is green: {rotated:?}");
+}
