@@ -138,11 +138,11 @@ impl TextureArray {
         self.format
     }
 
-    /// Creates a handle for unit tests that only exercise cache bookkeeping.
+    /// Creates a handle for test fixtures that only exercise cache bookkeeping.
     ///
-    /// The handle owns no GPU resource; painting or uploading it will fail
-    /// because its id is outside the registered array id range.
-    #[cfg(any(test, feature = "test-support"))]
+    /// This is a hidden API for downstream tests. The handle owns no GPU
+    /// resource; painting or uploading it will fail because its id is outside
+    /// the registered array id range.
     #[doc(hidden)]
     pub fn new_for_test(size: Size<DevicePixels>, layers: u32) -> Self {
         Self {
