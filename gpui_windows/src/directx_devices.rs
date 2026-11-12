@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use gpui_util::ResultExt;
 use itertools::Itertools;
@@ -41,6 +43,8 @@ pub(crate) struct DirectXDevices {
     pub(crate) dxgi_factory: IDXGIFactory6,
     pub(crate) device: ID3D11Device,
     pub(crate) device_context: ID3D11DeviceContext,
+    /// Shared by every window drawing with this device.
+    pub(crate) texture_arrays: Arc<crate::fast::texture_arrays::TextureArrayStore>,
 }
 
 impl DirectXDevices {
@@ -63,11 +67,18 @@ impl DirectXDevices {
             _ => unreachable!(),
         }
 
+        let texture_arrays = crate::fast::texture_arrays::TextureArrayStore::new(
+            device.clone(),
+            device_context.clone(),
+        );
+        gpui::replace_texture_array_platform(texture_arrays.clone());
+
         Ok(Self {
             adapter,
             dxgi_factory,
             device,
             device_context,
+            texture_arrays,
         })
     }
 }

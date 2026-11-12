@@ -12,12 +12,12 @@ use std::sync::Arc;
 use anyhow::Result;
 use gpui::{
     AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, ContentMask, Corners,
-    DevicePixels, Edges, FontId, GlyphId, Hsla,
-    ImageId, LayerFrame, LayerKey, MonochromeSprite, Path, PlatformAtlas, PolychromeSprite, Quad,
-    RenderGlyphParams, RenderImageParams, Rgba, ScaledPixels, Scene, SceneLayers, Shadow, Size,
-    SubpixelSprite, TextureArrayFormat, TextureArrayId, TextureArrayPlatform, TileCoord,
-    TileId, TransformationMatrix, Underline, layer_tile_id,
-    layer_tile_texture_id, linear_color_stop, linear_gradient, point, px, rgba, size,
+    DevicePixels, Edges, FontId, GlyphId, Hsla, ImageId, LayerFrame, LayerKey, MonochromeSprite,
+    Path, PlatformAtlas, PolychromeSprite, Quad, RenderGlyphParams, RenderImageParams, Rgba,
+    ScaledPixels, Scene, SceneLayers, Shadow, Size, SubpixelSprite, TextureArrayFormat,
+    TextureArrayId, TextureArrayPlatform, TileCoord, TileId, TransformationMatrix, Underline,
+    layer_tile_id, layer_tile_texture_id, linear_color_stop, linear_gradient, point, px, rgba,
+    size,
 };
 
 use crate::WgpuAtlas;
@@ -893,7 +893,11 @@ impl Harness {
         })?;
 
         let rendering_params = RenderingParameters::new(&adapter, format);
-        let bind_group_layouts = WgpuRendererCore::create_bind_group_layouts(&device, false);
+        let bind_group_layouts = WgpuRendererCore::create_bind_group_layouts(
+            &device,
+            false,
+            crate::fast::texture_arrays::bind_group_layout(&device),
+        );
         let pipelines = WgpuRendererCore::create_pipelines(
             &device,
             &bind_group_layouts,
@@ -1213,7 +1217,6 @@ pub(super) fn read_back(
     pixels
 }
 
-
 #[test]
 fn texture_array_layers_sample_their_own_contents() {
     let Some(mut harness) = Harness::new() else {
@@ -1280,7 +1283,6 @@ fn texture_array_layers_sample_their_own_contents() {
     );
 }
 
-
 const ROTATION_FIXTURE: [u8; 64] = [
     48, 255, 3, 0, 192, 255, 175, 170, 170, 170, 74, 146, 36, 73, 146, 36, 48, 255, 255, 15, 0, 0,
     172, 170, 170, 170, 74, 146, 36, 73, 146, 36, 48, 255, 3, 240, 63, 0, 172, 170, 170, 170, 74,
@@ -1324,6 +1326,7 @@ fn texture_array_rotation_restores_the_display_orientation() {
                 texture_id: id.atlas_texture_id(),
                 tile_id: TileId(0),
                 padding,
+                // A square layer has the same display and storage size.
                 bounds: Bounds {
                     origin: point(DevicePixels(0), DevicePixels(0)),
                     size: array_size,
@@ -1347,9 +1350,98 @@ fn texture_array_rotation_restores_the_display_orientation() {
     if normal.is_empty() || rotated.is_empty() {
         return;
     }
-    let normal = pixel(&normal, 32, 8, 8);
-    let rotated = pixel(&rotated, 32, 8, 8);
-    println!("normal={normal:?} rotated={rotated:?}");
-    assert!(normal[0] > 128 && normal[1] < 128, "normal top-left is red: {normal:?}");
-    assert!(rotated[1] > 128 && rotated[0] < 128, "rotated top-left is green: {rotated:?}");
+    let normal_top_left = pixel(&normal, 32, 8, 8);
+    let normal_bottom_left = pixel(&normal, 32, 8, 24);
+    let rotated_top_left = pixel(&rotated, 32, 8, 8);
+    println!(
+        "normal top-left={normal_top_left:?} bottom-left={normal_bottom_left:?} \
+         rotated top-left={rotated_top_left:?}"
+    );
+    assert!(
+        normal_top_left[0] > 128 && normal_top_left[1] < 128,
+        "normal top-left is red: {normal_top_left:?}"
+    );
+    assert_ne!(
+        normal_top_left, normal_bottom_left,
+        "the fixture must distinguish the two corners"
+    );
+    // A 90° CCW stored layer maps display top-left to stored bottom-left,
+    // which is the same texel the normal sprite shows at display bottom-left.
+    assert_eq!(
+        rotated_top_left, normal_bottom_left,
+        "rotated top-left must sample the stored bottom-left"
+    );
+}
+
+#[test]
+fn texture_array_rotation_handles_a_non_square_layer() {
+    fn render(padding: u32, tile_bounds: Size<DevicePixels>) -> Vec<u8> {
+        let Some(mut harness) = Harness::new() else {
+            return Vec::new();
+        };
+        let id = TextureArrayId::from_atlas_texture_id(AtlasTextureId {
+            index: 0xD000_0000 + 4_244,
+            kind: AtlasTextureKind::Polychrome,
+        })
+        .expect("array id");
+        // Stored 4x8: two blocks stacked vertically. The display is 8x4.
+        let array_size = device_size(4, 8);
+        if harness
+            .texture_arrays
+            .create_texture(id, array_size, 1, TextureArrayFormat::Bc7RgbaUnorm)
+            .is_err()
+        {
+            return Vec::new();
+        }
+        harness
+            .texture_arrays
+            .upload_layer(id, 0, &ROTATION_FIXTURE[..32])
+            .expect("layer");
+        let mut scene = Scene::default();
+        scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: 1,
+            grayscale: false.into(),
+            opacity: 1.,
+            bounds: sp(0., 0., 32., 16.),
+            content_mask: no_mask(),
+            corner_radii: Corners::default(),
+            tile: AtlasTile {
+                texture_id: id.atlas_texture_id(),
+                tile_id: TileId(0),
+                padding,
+                bounds: Bounds {
+                    origin: point(DevicePixels(0), DevicePixels(0)),
+                    size: tile_bounds,
+                },
+            },
+        });
+        harness.render(
+            &scene,
+            gpui::size(DevicePixels(32), DevicePixels(16)),
+            Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 255.0,
+            },
+        )
+    }
+
+    let normal = render(0, device_size(4, 8));
+    let rotated = render(1, device_size(8, 4));
+    if normal.is_empty() || rotated.is_empty() {
+        return;
+    }
+    let normal_top_left = pixel(&normal, 32, 8, 4);
+    let normal_bottom_left = pixel(&normal, 32, 8, 12);
+    let rotated_top_left = pixel(&rotated, 32, 8, 4);
+    assert_ne!(
+        normal_top_left, normal_bottom_left,
+        "the non-square fixture must distinguish its two blocks"
+    );
+    assert_eq!(
+        rotated_top_left, normal_bottom_left,
+        "a non-square rotated layer must map display top-left to stored bottom-left"
+    );
 }

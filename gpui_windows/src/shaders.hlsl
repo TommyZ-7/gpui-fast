@@ -1280,8 +1280,12 @@ float2 to_tile_position_array(float2 unit_vertex, AtlasTile tile) {
     uint height = 0;
     uint elements = 0;
     t_sprite_array.GetDimensions(width, height, elements);
+    // `tile.bounds` is always in display-space pixels. A rotated layer swaps
+    // the stored axes, so its display size is the storage array size reversed.
+    float2 array_size = float2(width, height);
+    float2 display_size = tile.padding == 1u ? array_size.yx : array_size;
     return (float2(tile.bounds.origin) + unit_vertex * float2(tile.bounds.size))
-        / float2(width, height);
+        / display_size;
 }
 
 PolychromeSpriteVertexOutput polychrome_array_sprite_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
@@ -1303,7 +1307,9 @@ PolychromeSpriteVertexOutput polychrome_array_sprite_vertex(uint vertex_id: SV_V
 
 float2 rotate_array_uv(float2 uv, uint rotation) {
     if (rotation == 1u) {
-        return float2(1.0f - uv.y, uv.x);
+        // The stored layer was rotated 90° counter-clockwise before upload,
+        // so its inverse maps display (u, v) to stored (v, 1 - u).
+        return float2(uv.y, 1.0f - uv.x);
     }
     return uv;
 }

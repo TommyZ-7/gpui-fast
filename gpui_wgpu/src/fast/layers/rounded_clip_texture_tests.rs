@@ -11,7 +11,11 @@ fn texture_renderer() -> crate::wgpu_renderer::WgpuHeadlessRenderer {
         .expect("instance-texture tests require a GPU");
     let core = &mut renderer.core;
     let device = &core.resources.device;
-    let layouts = crate::wgpu_renderer::WgpuRendererCore::create_bind_group_layouts(device, true);
+    let layouts = crate::wgpu_renderer::WgpuRendererCore::create_bind_group_layouts(
+        device,
+        true,
+        crate::fast::texture_arrays::bind_group_layout(device),
+    );
     let pipelines = crate::wgpu_renderer::WgpuRendererCore::create_pipelines(
         device,
         &layouts,

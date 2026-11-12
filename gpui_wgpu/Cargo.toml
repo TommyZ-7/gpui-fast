@@ -114,5 +114,8 @@ default-features = false
 features = ["webgl"]
 version = "=30.0.1"
 
+[dev-dependencies]
+naga = { version = "30.0.1", features = ["wgsl-in"] }
+
 [lints.rust.unexpected_cfgs]
 level = "allow"

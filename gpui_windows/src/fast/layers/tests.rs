@@ -784,6 +784,7 @@ struct Harness {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     atlas: DirectXAtlas,
+    texture_arrays: std::sync::Arc<crate::fast::texture_arrays::TextureArrayStore>,
     globals: DirectXGlobalElements,
     pipelines: DirectXRenderPipelines,
     frame: FrameState,
@@ -802,10 +803,13 @@ impl Harness {
         let globals = DirectXGlobalElements::new(&device).ok()?;
         set_rasterizer_state(&device, &context).ok()?;
         let atlas = DirectXAtlas::new(&device, &context);
+        let texture_arrays =
+            crate::fast::texture_arrays::TextureArrayStore::new(device.clone(), context.clone());
         Some(Harness {
             device,
             context,
             atlas,
+            texture_arrays,
             globals,
             pipelines,
             frame: FrameState::default(),
@@ -841,6 +845,7 @@ impl Harness {
                 device: &self.device,
                 device_context: &self.context,
                 atlas: &self.atlas,
+                texture_arrays: &self.texture_arrays,
                 globals: &self.globals,
                 paths: None,
             };
@@ -863,6 +868,7 @@ impl Harness {
             device: &self.device,
             device_context: &self.context,
             atlas: &self.atlas,
+            texture_arrays: &self.texture_arrays,
             globals: &self.globals,
             paths: Some(PathTargets {
                 render_target_view: &render_target,

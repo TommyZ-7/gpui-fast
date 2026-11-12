@@ -76,7 +76,11 @@ fn to_device_position(unit_vertex: vec2<f32>, bounds: Bounds) -> vec4<f32> {
 
 fn to_tile_position(unit_vertex: vec2<f32>, tile: AtlasTile) -> vec2<f32> {
     let array_size = vec2<f32>(textureDimensions(t_sprite_array, 0));
-    return (vec2<f32>(tile.bounds.origin) + unit_vertex * vec2<f32>(tile.bounds.size)) / array_size;
+    // `tile.bounds` is always in display-space pixels. A rotated layer swaps
+    // the stored axes, so its display size is the storage array size reversed.
+    let rotated = tile.padding == 1u;
+    let display_size = select(array_size, array_size.yx, rotated);
+    return (vec2<f32>(tile.bounds.origin) + unit_vertex * vec2<f32>(tile.bounds.size)) / display_size;
 }
 
 fn distance_from_clip_rect(unit_vertex: vec2<f32>, bounds: Bounds, clip_bounds: Bounds) -> vec4<f32> {
@@ -123,8 +127,9 @@ fn blend_color(color: vec4<f32>, alpha_factor: f32) -> vec4<f32> {
 
 fn rotate_uv(uv: vec2<f32>, rotation: u32) -> vec2<f32> {
     if (rotation == 1u) {
-        // The stored layer was rotated 90° counter-clockwise before upload.
-        return vec2<f32>(1.0 - uv.y, uv.x);
+        // The stored layer was rotated 90° counter-clockwise before upload,
+        // so its inverse maps display (u, v) to stored (v, 1 - u).
+        return vec2<f32>(uv.y, 1.0 - uv.x);
     }
     return uv;
 }

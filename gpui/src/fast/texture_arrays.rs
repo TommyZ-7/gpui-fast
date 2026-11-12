@@ -36,6 +36,7 @@ const TEXTURE_ARRAY_ID_LIMIT: u32 = 0x1000_0000;
 
 /// The pixel format of a texture array.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TextureArrayFormat {
     /// BC7 compressed RGBA, one byte per pixel (16 bytes per 4x4 block).
     Bc7RgbaUnorm,
@@ -43,18 +44,21 @@ pub enum TextureArrayFormat {
 
 impl TextureArrayFormat {
     /// The exact byte length of one layer of `size`.
+    ///
+    /// Returns `None` when either dimension is not positive or is not a
+    /// multiple of four, which this format requires so that every layer is
+    /// exactly representable as whole 4×4 BC7 blocks.
+    #[must_use]
     pub fn layer_len(self, size: Size<DevicePixels>) -> Option<usize> {
         match self {
             Self::Bc7RgbaUnorm => {
-                if size.width.0 <= 0
-                    || size.height.0 <= 0
-                    || size.width.0 % 4 != 0
-                    || size.height.0 % 4 != 0
-                {
+                let width = u32::try_from(size.width.0).ok()?;
+                let height = u32::try_from(size.height.0).ok()?;
+                if width == 0 || height == 0 || width % 4 != 0 || height % 4 != 0 {
                     return None;
                 }
-                let blocks_x = size.width.0 as usize / 4;
-                let blocks_y = size.height.0 as usize / 4;
+                let blocks_x = usize::try_from(width / 4).ok()?;
+                let blocks_y = usize::try_from(height / 4).ok()?;
                 blocks_x.checked_mul(blocks_y)?.checked_mul(16)
             }
         }
@@ -64,6 +68,7 @@ impl TextureArrayFormat {
 /// How the stored texture is rotated when sampled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum TextureArrayUv {
     /// The stored layer is upright in display space.
     Normal = 0,
@@ -78,6 +83,7 @@ pub struct TextureArrayId(u32);
 impl TextureArrayId {
     /// The atlas texture id a sprite of this array carries. Renderers resolve
     /// this reserved range before consulting the sprite atlas.
+    #[must_use]
     pub fn atlas_texture_id(self) -> AtlasTextureId {
         AtlasTextureId {
             index: TEXTURE_ARRAY_INDEX_BASE.wrapping_add(self.0),
@@ -86,6 +92,7 @@ impl TextureArrayId {
     }
 
     /// The texture array id behind an atlas texture id, if it is one.
+    #[must_use]
     pub fn from_atlas_texture_id(id: AtlasTextureId) -> Option<Self> {
         (id.kind == AtlasTextureKind::Polychrome
             && id.index >= TEXTURE_ARRAY_INDEX_BASE
@@ -108,21 +115,25 @@ pub struct TextureArray {
 
 impl TextureArray {
     /// Identifies the array in its renderer's lookup table.
+    #[must_use]
     pub fn id(&self) -> TextureArrayId {
         self.id
     }
 
     /// The 2D size of every layer.
+    #[must_use]
     pub fn size(&self) -> Size<DevicePixels> {
         self.size
     }
 
     /// The number of layers.
+    #[must_use]
     pub fn layers(&self) -> u32 {
         self.layers
     }
 
     /// The layer format.
+    #[must_use]
     pub fn format(&self) -> TextureArrayFormat {
         self.format
     }
@@ -130,11 +141,12 @@ impl TextureArray {
     /// Creates a handle for unit tests that only exercise cache bookkeeping.
     ///
     /// The handle owns no GPU resource; painting or uploading it will fail
-    /// because its id is not registered with a platform backend.
+    /// because its id is outside the registered array id range.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn new_for_test(size: Size<DevicePixels>, layers: u32) -> Self {
         Self {
-            id: TextureArrayId(0),
+            id: TextureArrayId(u32::MAX),
             size,
             layers,
             format: TextureArrayFormat::Bc7RgbaUnorm,
@@ -150,6 +162,10 @@ impl TextureArray {
 /// The GPU side of texture arrays, implemented by platform renderers.
 pub trait TextureArrayPlatform: Send + Sync {
     /// Allocates the array. No layer contents are uploaded yet.
+    ///
+    /// # Errors
+    /// Returns an error when the device cannot represent the requested
+    /// format, dimensions, or layer count.
     fn create_texture(
         &self,
         id: TextureArrayId,
@@ -159,12 +175,11 @@ pub trait TextureArrayPlatform: Send + Sync {
     ) -> Result<()>;
 
     /// Uploads one tightly packed layer of `format.layer_len(size)` bytes.
-    fn upload_layer(
-        &self,
-        id: TextureArrayId,
-        layer: u32,
-        blocks: &[u8],
-    ) -> Result<()>;
+    ///
+    /// # Errors
+    /// Returns an error when the array is unknown, the layer is out of range,
+    /// or the backend rejects the upload.
+    fn upload_layer(&self, id: TextureArrayId, layer: u32, blocks: &[u8]) -> Result<()>;
 
     /// Releases the array allocated for `id`.
     fn remove_texture(&self, id: TextureArrayId);
@@ -173,15 +188,32 @@ pub trait TextureArrayPlatform: Send + Sync {
 static PLATFORM: parking_lot::RwLock<Option<Arc<dyn TextureArrayPlatform>>> =
     parking_lot::RwLock::new(None);
 
-/// Installs the platform backend for texture arrays.
+/// Installs the platform backend for texture arrays and returns the installed
+/// backend.
 ///
-/// Called once by the renderer while it is coming up. The first backend wins:
-/// arrays must stay on the device that draws them.
-pub fn set_texture_array_platform(backend: Arc<dyn TextureArrayPlatform>) {
+/// The first backend wins: arrays must stay on the device that draws them.
+/// Renderers should keep the returned [`Arc`] and use it for both lookups and
+/// uploads, so every window sharing the device reads the same arrays.
+pub fn set_texture_array_platform(
+    backend: Arc<dyn TextureArrayPlatform>,
+) -> Arc<dyn TextureArrayPlatform> {
     let mut platform = PLATFORM.write();
-    if platform.is_none() {
-        *platform = Some(backend);
+    platform.get_or_insert(backend).clone()
+}
+
+/// Replaces the texture-array backend after its device was lost or replaced.
+///
+/// Every existing [`TextureArray`] handle becomes stale: its metadata is
+/// dropped, and later uploads or paints fail with `unknown texture array`.
+/// Applications must recreate their arrays on the replacement device.
+/// Renderer backends call this while recreating their device.
+pub fn replace_texture_array_platform(backend: Arc<dyn TextureArrayPlatform>) {
+    {
+        *PLATFORM.write() = Some(backend);
     }
+    // Take the locks one at a time: `remove` holds LIVE_ARRAYS while reading
+    // PLATFORM, so holding both here in the opposite order would deadlock.
+    live_arrays().clear();
 }
 
 fn platform() -> Result<Arc<dyn TextureArrayPlatform>> {
@@ -330,7 +362,7 @@ pub(crate) fn paint(
         return Ok(());
     }
 
-    let tile = sub_tile(size, image_bounds, visible_bounds);
+    let tile = sub_tile(size, uv, image_bounds, visible_bounds);
     let visible_bounds_snapped = window.snap_bounds(visible_bounds);
     let content_mask = window.snapped_content_mask();
     let corner_radii = corner_radii
@@ -358,8 +390,14 @@ pub(crate) fn paint(
 }
 
 /// Maps the visible part of a fitted image back to texture pixels.
+///
+/// The result is always in display-space pixels. For [`TextureArrayUv::Normal`]
+/// that is also the stored layout; for [`TextureArrayUv::Rotate90`] the stored
+/// layer has its axes swapped and the shader rotates the display UV before
+/// sampling.
 fn sub_tile(
     size: Size<DevicePixels>,
+    uv: TextureArrayUv,
     image_bounds: Bounds<Pixels>,
     visible_bounds: Bounds<Pixels>,
 ) -> Bounds<DevicePixels> {
@@ -370,20 +408,28 @@ fn sub_tile(
     let width_ratio = visible_bounds.size.width / image_bounds.size.width;
     let height_ratio = visible_bounds.size.height / image_bounds.size.height;
 
-    let tile_width = size.width.0;
-    let tile_height = size.height.0;
-    let origin_x = (x_offset_ratio * tile_width as f32).round() as i32;
-    let origin_y = (y_offset_ratio * tile_height as f32).round() as i32;
-    let width = (width_ratio * tile_width as f32).round() as i32;
-    let height = (height_ratio * tile_height as f32).round() as i32;
+    let (display_width, display_height) = match uv {
+        TextureArrayUv::Normal => (size.width.0, size.height.0),
+        // The stored layer is the display image rotated 90° CCW, so the
+        // stored width is the display height and the stored height is the
+        // display width.
+        TextureArrayUv::Rotate90 => (size.height.0, size.width.0),
+    };
+    let origin_x = (x_offset_ratio * display_width as f32).round() as i32;
+    let origin_y = (y_offset_ratio * display_height as f32).round() as i32;
+    let width = (width_ratio * display_width as f32).round() as i32;
+    let height = (height_ratio * display_height as f32).round() as i32;
 
-    let clamped_origin_x = origin_x.clamp(0, tile_width);
-    let clamped_origin_y = origin_y.clamp(0, tile_height);
-    let clamped_width = width.min(tile_width - clamped_origin_x).max(0);
-    let clamped_height = height.min(tile_height - clamped_origin_y).max(0);
+    let clamped_origin_x = origin_x.clamp(0, display_width);
+    let clamped_origin_y = origin_y.clamp(0, display_height);
+    let clamped_width = width.min(display_width - clamped_origin_x).max(0);
+    let clamped_height = height.min(display_height - clamped_origin_y).max(0);
 
     Bounds {
-        origin: crate::point(DevicePixels(clamped_origin_x), DevicePixels(clamped_origin_y)),
+        origin: crate::point(
+            DevicePixels(clamped_origin_x),
+            DevicePixels(clamped_origin_y),
+        ),
         size: crate::size(DevicePixels(clamped_width), DevicePixels(clamped_height)),
     }
 }
@@ -403,6 +449,14 @@ impl Window {
     /// The array is created outside the sprite atlas and starts with
     /// unspecified contents. Upload each layer with
     /// [`Window::upload_texture_array_layer`] before painting it.
+    ///
+    /// For [`TextureArrayFormat::Bc7RgbaUnorm`], both dimensions must be
+    /// positive multiples of four.
+    ///
+    /// # Errors
+    /// Returns an error when no texture-array backend is installed, the
+    /// dimensions or layer count are invalid, the id space is exhausted, or
+    /// the backend cannot allocate the texture.
     pub fn create_texture_array(
         &mut self,
         size: Size<DevicePixels>,
@@ -413,6 +467,11 @@ impl Window {
     }
 
     /// Uploads one tightly packed BC7 layer and marks the window for redraw.
+    ///
+    /// # Errors
+    /// Returns an error when the array was removed, the layer is out of range,
+    /// `blocks` is not exactly `format.layer_len(size)` bytes, or the backend
+    /// rejects the upload.
     pub fn upload_texture_array_layer(
         &mut self,
         array: TextureArray,
@@ -428,6 +487,12 @@ impl Window {
     ///
     /// Call during the paint phase. `Rotate90` treats the stored layer as
     /// rotated 90° counter-clockwise and restores it on sampling.
+    ///
+    /// # Errors
+    /// Returns an error when the array was removed or `layer` is out of range.
+    ///
+    /// # Panics
+    /// Panics in debug builds when called outside the paint phase.
     pub fn paint_texture_array_layer(
         &mut self,
         bounds: Bounds<Pixels>,
@@ -450,8 +515,8 @@ impl Window {
 mod tests {
     use super::{
         ArrayState, TEXTURE_ARRAY_INDEX_BASE, TextureArray, TextureArrayFormat, TextureArrayId,
-        TextureArrayPlatform, TextureArrayUv, create, live_arrays, live_state,
-        require_platform, upload,
+        TextureArrayPlatform, TextureArrayUv, create, live_arrays, live_state, require_platform,
+        upload,
     };
     use crate::{AtlasTextureKind, Bounds, DevicePixels, Pixels, Size, point, size};
     use anyhow::Result;
@@ -479,12 +544,7 @@ mod tests {
             Ok(())
         }
 
-        fn upload_layer(
-            &self,
-            id: TextureArrayId,
-            layer: u32,
-            blocks: &[u8],
-        ) -> Result<()> {
+        fn upload_layer(&self, id: TextureArrayId, layer: u32, blocks: &[u8]) -> Result<()> {
             if self.fail_upload.load(Ordering::SeqCst) {
                 anyhow::bail!("backend refused the upload");
             }
@@ -499,15 +559,19 @@ mod tests {
 
     static MOCK_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
+    fn new_mock() -> Arc<MockPlatform> {
+        Arc::new(MockPlatform {
+            created: parking_lot::Mutex::new(Vec::new()),
+            uploaded: parking_lot::Mutex::new(Vec::new()),
+            removed: parking_lot::Mutex::new(Vec::new()),
+            fail_upload: AtomicBool::new(false),
+        })
+    }
+
     fn shared_mock() -> &'static Arc<MockPlatform> {
         static MOCK: OnceLock<Arc<MockPlatform>> = OnceLock::new();
         MOCK.get_or_init(|| {
-            let mock = Arc::new(MockPlatform {
-                created: parking_lot::Mutex::new(Vec::new()),
-                uploaded: parking_lot::Mutex::new(Vec::new()),
-                removed: parking_lot::Mutex::new(Vec::new()),
-                fail_upload: AtomicBool::new(false),
-            });
+            let mock = new_mock();
             super::set_texture_array_platform(mock.clone());
             mock
         })
@@ -528,7 +592,12 @@ mod tests {
     }
 
     fn blocks(width: i32, height: i32) -> Vec<u8> {
-        vec![0u8; TextureArrayFormat::Bc7RgbaUnorm.layer_len(canvas(width, height)).unwrap()]
+        vec![
+            0u8;
+            TextureArrayFormat::Bc7RgbaUnorm
+                .layer_len(canvas(width, height))
+                .unwrap()
+        ]
     }
 
     #[test]
@@ -648,7 +717,44 @@ mod tests {
             size: size(Pixels(300.), Pixels(200.)),
         };
 
-        let tile = super::sub_tile(canvas_size, image, visible);
+        let tile = super::sub_tile(canvas_size, TextureArrayUv::Normal, image, visible);
+
+        assert_eq!(tile.origin.x.0, 50);
+        assert_eq!(tile.origin.y.0, 0);
+        assert_eq!(tile.size.width.0, 300);
+        assert_eq!(tile.size.height.0, 200);
+    }
+
+    #[test]
+    fn rotate90_sub_tile_uses_display_axes() {
+        // Stored 200x400 means the display image is 400x200.
+        let stored_size = canvas(200, 400);
+        let image = Bounds {
+            origin: point(Pixels(0.), Pixels(0.)),
+            size: size(Pixels(400.), Pixels(200.)),
+        };
+
+        let tile = super::sub_tile(stored_size, TextureArrayUv::Rotate90, image, image);
+
+        assert_eq!(tile.origin.x.0, 0);
+        assert_eq!(tile.origin.y.0, 0);
+        assert_eq!(tile.size.width.0, 400);
+        assert_eq!(tile.size.height.0, 200);
+    }
+
+    #[test]
+    fn rotate90_sub_tile_maps_a_clipped_visible_rect_in_display_space() {
+        let stored_size = canvas(200, 400);
+        let image = Bounds {
+            origin: point(Pixels(0.), Pixels(0.)),
+            size: size(Pixels(400.), Pixels(200.)),
+        };
+        let visible = Bounds {
+            origin: point(Pixels(50.), Pixels(0.)),
+            size: size(Pixels(300.), Pixels(200.)),
+        };
+
+        let tile = super::sub_tile(stored_size, TextureArrayUv::Rotate90, image, visible);
 
         assert_eq!(tile.origin.x.0, 50);
         assert_eq!(tile.origin.y.0, 0);
@@ -687,6 +793,39 @@ mod tests {
         let (_lock, _mock) = fresh_mock();
         let array = create(canvas(8, 8), 2, TextureArrayFormat::Bc7RgbaUnorm).expect("created");
         let state: Arc<ArrayState> = live_state(array.id()).expect("state");
-        assert!(state.versions.iter().all(|v| v.load(Ordering::Relaxed) == 1));
+        assert!(
+            state
+                .versions
+                .iter()
+                .all(|v| v.load(Ordering::Relaxed) == 1)
+        );
+    }
+
+    #[test]
+    fn set_texture_array_platform_returns_the_installed_backend() {
+        let (_lock, mock) = fresh_mock();
+        let installed = super::set_texture_array_platform(mock.clone());
+        assert_eq!(
+            Arc::as_ptr(&installed) as *const (),
+            Arc::as_ptr(&mock) as *const (),
+        );
+    }
+
+    #[test]
+    fn replacing_the_platform_invalidates_live_arrays() {
+        let (_lock, _mock) = fresh_mock();
+        let array = create(canvas(8, 8), 1, TextureArrayFormat::Bc7RgbaUnorm).expect("created");
+        let replacement = new_mock();
+
+        super::replace_texture_array_platform(replacement.clone());
+
+        assert!(live_state(array.id()).is_err());
+        let new_array = create(canvas(8, 8), 1, TextureArrayFormat::Bc7RgbaUnorm)
+            .expect("created on replacement");
+        assert_eq!(replacement.created.lock().len(), 1);
+        new_array.remove();
+
+        // Leave the shared mock installed for the other tests.
+        super::replace_texture_array_platform(shared_mock().clone());
     }
 }
