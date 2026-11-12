@@ -464,6 +464,13 @@ impl WgpuContext {
         let required_limits = wgpu::Limits::downlevel_defaults()
             .using_resolution(adapter.limits())
             .using_alignment(adapter.limits());
+        // The thumbnail cache uses a fixed 512-layer array. Raise the limit
+        // when the adapter can provide it; the texture-array store reports a
+        // clear error when the adapter cannot.
+        let mut required_limits = required_limits;
+        if adapter.limits().max_texture_array_layers >= 512 {
+            required_limits.max_texture_array_layers = 512;
+        }
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {

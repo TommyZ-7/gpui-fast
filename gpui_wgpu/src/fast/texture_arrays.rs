@@ -64,6 +64,17 @@ impl TextureArrayStore {
         );
         let width = u32::try_from(size.width.0).context("negative array width")?;
         let height = u32::try_from(size.height.0).context("negative array height")?;
+        let limits = self.device.limits();
+        anyhow::ensure!(
+            layers <= limits.max_texture_array_layers,
+            "texture array needs {layers} layers, device supports {}",
+            limits.max_texture_array_layers
+        );
+        anyhow::ensure!(
+            width <= limits.max_texture_dimension_2d && height <= limits.max_texture_dimension_2d,
+            "texture array {width}x{height} exceeds the device's {} pixel limit",
+            limits.max_texture_dimension_2d
+        );
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("texture_array"),
             size: wgpu::Extent3d {
