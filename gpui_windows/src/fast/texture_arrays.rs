@@ -227,12 +227,9 @@ mod tests {
         })
         .expect("array id");
         let array_size = size(DevicePixels(3), DevicePixels(2));
-        if store
+        store
             .create_texture(id, array_size, 1, TextureArrayFormat::Rgba8Unorm)
-            .is_err()
-        {
-            return;
-        }
+            .expect("rgba8 array creation");
         let pixels = [0x11u8; 3 * 2 * 4];
         store.upload_layer(id, 0, &pixels).expect("rgba8 upload");
         store.remove_texture(id);
