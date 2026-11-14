@@ -1,4 +1,4 @@
-//! BC7 `Texture2DArray` storage for thumbnail sprites.
+//! BC7 and RGBA8 `Texture2DArray` storage for thumbnail sprites.
 //!
 //! The core crate owns the logical array. This store owns the Direct3D 11
 //! texture and shader resource view the array sprite pipeline samples.
@@ -16,12 +16,55 @@ use windows::Win32::Graphics::{
         D3D11_USAGE_DEFAULT, ID3D11Device, ID3D11DeviceContext, ID3D11ShaderResourceView,
         ID3D11Texture2D,
     },
-    Dxgi::Common::{DXGI_FORMAT_BC7_UNORM, DXGI_SAMPLE_DESC},
+    Dxgi::Common::{
+        DXGI_FORMAT, DXGI_FORMAT_BC7_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
+    },
 };
+
+/// The Direct3D format that stores layers of `format`, if it is supported.
+fn dxgi_texture_format(format: TextureArrayFormat) -> Option<DXGI_FORMAT> {
+    match format {
+        TextureArrayFormat::Bc7RgbaUnorm => Some(DXGI_FORMAT_BC7_UNORM),
+        TextureArrayFormat::Rgba8Unorm => Some(DXGI_FORMAT_R8G8B8A8_UNORM),
+        _ => None,
+    }
+}
+
+/// The bytes per row and per layer of one `format` layer with these
+/// dimensions.
+fn layer_row_layout(format: TextureArrayFormat, width: u32, height: u32) -> Result<(u32, u32)> {
+    match format {
+        TextureArrayFormat::Bc7RgbaUnorm => {
+            anyhow::ensure!(
+                width.is_multiple_of(4) && height.is_multiple_of(4),
+                "BC7 array dimensions must be multiples of four"
+            );
+            let row_pitch = (width / 4)
+                .checked_mul(16)
+                .context("texture array row pitch overflow")?;
+            let depth_pitch = row_pitch
+                .checked_mul(height / 4)
+                .context("texture array depth pitch overflow")?;
+            Ok((row_pitch, depth_pitch))
+        }
+        TextureArrayFormat::Rgba8Unorm => {
+            let row_pitch = width
+                .checked_mul(4)
+                .context("texture array row pitch overflow")?;
+            let depth_pitch = row_pitch
+                .checked_mul(height)
+                .context("texture array depth pitch overflow")?;
+            Ok((row_pitch, depth_pitch))
+        }
+        _ => anyhow::bail!("unsupported texture array format"),
+    }
+}
 
 struct GpuArray {
     texture: ID3D11Texture2D,
     view: ID3D11ShaderResourceView,
+    /// How the uploaded layers are laid out, which decides the upload pitches.
+    format: TextureArrayFormat,
 }
 
 /// The arrays one Direct3D device owns.
@@ -50,12 +93,15 @@ impl TextureArrayStore {
         id: TextureArrayId,
         size: Size<DevicePixels>,
         layers: u32,
+        format: TextureArrayFormat,
     ) -> Result<()> {
-        let support = unsafe { self.device.CheckFormatSupport(DXGI_FORMAT_BC7_UNORM) }
-            .context("cannot query BC7 texture support")?;
+        let dxgi_format =
+            dxgi_texture_format(format).context("unsupported texture array format")?;
+        let support = unsafe { self.device.CheckFormatSupport(dxgi_format) }
+            .context("cannot query texture array format support")?;
         anyhow::ensure!(
             support & D3D11_FORMAT_SUPPORT_TEXTURE2D.0 as u32 != 0,
-            "BC7 texture arrays are not supported by this device"
+            "texture arrays of {format:?} are not supported by this device"
         );
         let width = u32::try_from(size.width.0).context("negative array width")?;
         let height = u32::try_from(size.height.0).context("negative array height")?;
@@ -64,7 +110,7 @@ impl TextureArrayStore {
             Height: height,
             MipLevels: 1,
             ArraySize: layers,
-            Format: DXGI_FORMAT_BC7_UNORM,
+            Format: dxgi_format,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
@@ -78,11 +124,11 @@ impl TextureArrayStore {
         unsafe {
             self.device
                 .CreateTexture2D(&desc, None, Some(&mut texture))
-                .context("cannot create BC7 texture array")?;
+                .context("cannot create texture array")?;
         }
         let texture = texture.context("device returned no texture array")?;
         let view_desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
-            Format: DXGI_FORMAT_BC7_UNORM,
+            Format: dxgi_format,
             ViewDimension: D3D11_SRV_DIMENSION_TEXTURE2DARRAY,
             Anonymous: windows::Win32::Graphics::Direct3D11::D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
                 Texture2DArray: D3D11_TEX2D_ARRAY_SRV {
@@ -97,10 +143,17 @@ impl TextureArrayStore {
         unsafe {
             self.device
                 .CreateShaderResourceView(&texture, Some(&view_desc), Some(&mut view))
-                .context("cannot create BC7 texture array view")?;
+                .context("cannot create texture array view")?;
         }
         let view = view.context("device returned no array view")?;
-        self.arrays.lock().insert(id, GpuArray { texture, view });
+        self.arrays.lock().insert(
+            id,
+            GpuArray {
+                texture,
+                view,
+                format,
+            },
+        );
         Ok(())
     }
 }
@@ -113,11 +166,7 @@ impl TextureArrayPlatform for TextureArrayStore {
         layers: u32,
         format: TextureArrayFormat,
     ) -> Result<()> {
-        anyhow::ensure!(
-            format == TextureArrayFormat::Bc7RgbaUnorm,
-            "unsupported texture array format"
-        );
-        self.create_gpu_texture(id, size, layers)
+        self.create_gpu_texture(id, size, layers, format)
     }
 
     fn upload_layer(&self, id: TextureArrayId, layer: u32, blocks: &[u8]) -> Result<()> {
@@ -127,15 +176,10 @@ impl TextureArrayPlatform for TextureArrayStore {
         unsafe { array.texture.GetDesc(&mut desc) };
         anyhow::ensure!(layer < desc.ArraySize, "texture array layer out of range");
         anyhow::ensure!(
-            desc.Width % 4 == 0 && desc.Height % 4 == 0,
-            "BC7 array dimensions must be multiples of four"
+            dxgi_texture_format(array.format) == Some(desc.Format),
+            "texture array format changed after creation"
         );
-        let row_pitch = (desc.Width / 4)
-            .checked_mul(16)
-            .context("texture array row pitch overflow")?;
-        let depth_pitch = row_pitch
-            .checked_mul(desc.Height / 4)
-            .context("texture array depth pitch overflow")?;
+        let (row_pitch, depth_pitch) = layer_row_layout(array.format, desc.Width, desc.Height)?;
         anyhow::ensure!(
             blocks.len() >= depth_pitch as usize,
             "texture array layer is shorter than its dimensions"
@@ -170,6 +214,57 @@ mod tests {
     use windows::Win32::Graphics::Direct3D11::{
         D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_USAGE_STAGING,
     };
+
+    #[test]
+    fn rgba8_uploads_arbitrary_dimensions() {
+        let Ok(devices) = DirectXDevices::new() else {
+            return;
+        };
+        let store = TextureArrayStore::new(devices.device.clone(), devices.device_context.clone());
+        let id = TextureArrayId::from_atlas_texture_id(AtlasTextureId {
+            index: 0xD000_0000 + 43,
+            kind: AtlasTextureKind::Polychrome,
+        })
+        .expect("array id");
+        let array_size = size(DevicePixels(3), DevicePixels(2));
+        if store
+            .create_texture(id, array_size, 1, TextureArrayFormat::Rgba8Unorm)
+            .is_err()
+        {
+            return;
+        }
+        let pixels = [0x11u8; 3 * 2 * 4];
+        store.upload_layer(id, 0, &pixels).expect("rgba8 upload");
+        store.remove_texture(id);
+    }
+
+    #[test]
+    fn formats_map_to_matching_dxgi_formats() {
+        assert_eq!(
+            dxgi_texture_format(TextureArrayFormat::Bc7RgbaUnorm),
+            Some(DXGI_FORMAT_BC7_UNORM)
+        );
+        assert_eq!(
+            dxgi_texture_format(TextureArrayFormat::Rgba8Unorm),
+            Some(DXGI_FORMAT_R8G8B8A8_UNORM)
+        );
+    }
+
+    #[test]
+    fn upload_pitches_follow_the_array_format() {
+        assert_eq!(
+            layer_row_layout(TextureArrayFormat::Bc7RgbaUnorm, 8, 8).expect("bc7 layout"),
+            (32, 64)
+        );
+        assert_eq!(
+            layer_row_layout(TextureArrayFormat::Rgba8Unorm, 3, 2).expect("rgba8 layout"),
+            (12, 24)
+        );
+        assert!(
+            layer_row_layout(TextureArrayFormat::Bc7RgbaUnorm, 3, 2).is_err(),
+            "BC7 layers need whole 4x4 blocks"
+        );
+    }
 
     #[test]
     fn uploads_each_layer_to_its_own_slice() {
