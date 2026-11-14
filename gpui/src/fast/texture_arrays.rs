@@ -1,7 +1,8 @@
-//! Immutable, block-compressed texture arrays sampled as ordinary sprites.
+//! Immutable texture arrays (BC7-compressed or RGBA8) sampled as ordinary
+//! sprites.
 //!
 //! A [`TextureArray`] is a platform-owned `Texture2DArray`. Applications
-//! upload whole layers of BC7 blocks and paint them with
+//! upload whole layers of BC7 blocks or RGBA8 pixels and paint them with
 //! [`Window::paint_texture_array_layer`]. The scene carries them as
 //! [`PolychromeSprite`]s in a reserved atlas id range, so batching, clipping,
 //! rounded corners and scroll-tile hashing reuse the existing sprite path.
@@ -40,14 +41,18 @@ const TEXTURE_ARRAY_ID_LIMIT: u32 = 0x1000_0000;
 pub enum TextureArrayFormat {
     /// BC7 compressed RGBA, one byte per pixel (16 bytes per 4x4 block).
     Bc7RgbaUnorm,
+    /// Uncompressed RGBA8, four bytes per pixel.
+    Rgba8Unorm,
 }
 
 impl TextureArrayFormat {
     /// The exact byte length of one layer of `size`.
     ///
-    /// Returns `None` when either dimension is not positive or is not a
-    /// multiple of four, which this format requires so that every layer is
-    /// exactly representable as whole 4×4 BC7 blocks.
+    /// Returns `None` when either dimension is not positive, or when
+    /// [`TextureArrayFormat::Bc7RgbaUnorm`] dimensions are not multiples of
+    /// four, which that format requires so every layer is exactly
+    /// representable as whole 4×4 BC7 blocks. `Rgba8Unorm` accepts arbitrary
+    /// positive dimensions.
     #[must_use]
     pub fn layer_len(self, size: Size<DevicePixels>) -> Option<usize> {
         match self {
@@ -60,6 +65,16 @@ impl TextureArrayFormat {
                 let blocks_x = usize::try_from(width / 4).ok()?;
                 let blocks_y = usize::try_from(height / 4).ok()?;
                 blocks_x.checked_mul(blocks_y)?.checked_mul(16)
+            }
+            Self::Rgba8Unorm => {
+                let width = u32::try_from(size.width.0).ok()?;
+                let height = u32::try_from(size.height.0).ok()?;
+                if width == 0 || height == 0 {
+                    return None;
+                }
+                let width = usize::try_from(width).ok()?;
+                let height = usize::try_from(height).ok()?;
+                width.checked_mul(height)?.checked_mul(4)
             }
         }
     }
@@ -451,7 +466,8 @@ impl Window {
     /// [`Window::upload_texture_array_layer`] before painting it.
     ///
     /// For [`TextureArrayFormat::Bc7RgbaUnorm`], both dimensions must be
-    /// positive multiples of four.
+    /// positive multiples of four. [`TextureArrayFormat::Rgba8Unorm`] accepts
+    /// arbitrary positive dimensions.
     ///
     /// # Errors
     /// Returns an error when no texture-array backend is installed, the
@@ -466,7 +482,8 @@ impl Window {
         create(size, layers, format)
     }
 
-    /// Uploads one tightly packed BC7 layer and marks the window for redraw.
+    /// Uploads one tightly packed BC7 block or RGBA8 byte layer and marks the
+    /// window for redraw.
     ///
     /// # Errors
     /// Returns an error when the array was removed, the layer is out of range,
@@ -626,6 +643,13 @@ mod tests {
     }
 
     #[test]
+    fn create_accepts_rgba8_arbitrary_dimensions() {
+        let (_lock, _mock) = fresh_mock();
+        assert!(create(canvas(3, 2), 1, TextureArrayFormat::Rgba8Unorm).is_ok());
+        assert!(create(canvas(383, 216), 1, TextureArrayFormat::Rgba8Unorm).is_ok());
+    }
+
+    #[test]
     fn reserved_atlas_id_round_trips() {
         let id = TextureArrayId(7);
         let atlas = id.atlas_texture_id();
@@ -643,6 +667,27 @@ mod tests {
         assert_eq!(
             TextureArrayFormat::Bc7RgbaUnorm.layer_len(canvas(256, 144)),
             Some(256 * 144)
+        );
+    }
+
+    #[test]
+    fn rgba8_layer_length_accepts_arbitrary_dimensions() {
+        assert_eq!(
+            TextureArrayFormat::Rgba8Unorm.layer_len(canvas(3, 2)),
+            Some(24)
+        );
+        assert_eq!(
+            TextureArrayFormat::Rgba8Unorm.layer_len(canvas(384, 216)),
+            Some(384 * 216 * 4)
+        );
+    }
+
+    #[test]
+    fn rgba8_layer_length_rejects_empty_dimensions() {
+        assert_eq!(TextureArrayFormat::Rgba8Unorm.layer_len(canvas(0, 2)), None);
+        assert_eq!(
+            TextureArrayFormat::Rgba8Unorm.layer_len(canvas(-1, 2)),
+            None
         );
     }
 
