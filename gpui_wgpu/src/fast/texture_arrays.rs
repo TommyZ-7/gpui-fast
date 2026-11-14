@@ -1,4 +1,4 @@
-//! BC7 `Texture2DArray` storage for thumbnail sprites.
+//! BC7 and RGBA8 `Texture2DArray` storage for thumbnail sprites.
 //!
 //! The core crate owns the logical array (size, layer count, versions). This
 //! store owns the GPU texture and the bind group the array sprite pipeline
@@ -15,6 +15,8 @@ use parking_lot::Mutex;
 struct GpuArray {
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
+    /// How the uploaded layers are laid out, which decides the upload strides.
+    format: TextureArrayFormat,
 }
 
 /// The arrays one renderer device owns.
@@ -59,6 +61,39 @@ pub(crate) fn sampler(device: &wgpu::Device) -> wgpu::Sampler {
     })
 }
 
+/// The wgpu format that stores layers of `format`, if it is supported.
+fn wgpu_texture_format(format: TextureArrayFormat) -> Option<wgpu::TextureFormat> {
+    match format {
+        TextureArrayFormat::Bc7RgbaUnorm => Some(wgpu::TextureFormat::Bc7RgbaUnorm),
+        TextureArrayFormat::Rgba8Unorm => Some(wgpu::TextureFormat::Rgba8Unorm),
+        _ => None,
+    }
+}
+
+/// The bytes per row and number of rows of one `format` layer with these
+/// dimensions.
+fn layer_row_layout(format: TextureArrayFormat, width: u32, height: u32) -> Result<(u32, u32)> {
+    match format {
+        TextureArrayFormat::Bc7RgbaUnorm => {
+            anyhow::ensure!(
+                width.is_multiple_of(4) && height.is_multiple_of(4),
+                "BC7 array dimensions must be multiples of four"
+            );
+            let row_bytes = (width / 4)
+                .checked_mul(16)
+                .context("texture array row size overflow")?;
+            Ok((row_bytes, height / 4))
+        }
+        TextureArrayFormat::Rgba8Unorm => {
+            let row_bytes = width
+                .checked_mul(4)
+                .context("texture array row size overflow")?;
+            Ok((row_bytes, height))
+        }
+        _ => anyhow::bail!("unsupported texture array format"),
+    }
+}
+
 impl TextureArrayStore {
     pub(crate) fn new(
         device: Arc<wgpu::Device>,
@@ -93,13 +128,18 @@ impl TextureArrayStore {
         id: TextureArrayId,
         size: Size<DevicePixels>,
         layers: u32,
+        format: TextureArrayFormat,
     ) -> Result<()> {
-        anyhow::ensure!(
-            self.device
-                .features()
-                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
-            "BC7 texture compression is not supported by this device"
-        );
+        let wgpu_format =
+            wgpu_texture_format(format).context("unsupported texture array format")?;
+        if format == TextureArrayFormat::Bc7RgbaUnorm {
+            anyhow::ensure!(
+                self.device
+                    .features()
+                    .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
+                "BC7 texture compression is not supported by this device"
+            );
+        }
         let width = u32::try_from(size.width.0).context("negative array width")?;
         let height = u32::try_from(size.height.0).context("negative array height")?;
         let limits = self.device.limits();
@@ -123,7 +163,7 @@ impl TextureArrayStore {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Bc7RgbaUnorm,
+            format: wgpu_format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -150,6 +190,7 @@ impl TextureArrayStore {
             GpuArray {
                 texture,
                 bind_group,
+                format,
             },
         );
         Ok(())
@@ -164,11 +205,7 @@ impl TextureArrayPlatform for TextureArrayStore {
         layers: u32,
         format: TextureArrayFormat,
     ) -> Result<()> {
-        anyhow::ensure!(
-            format == TextureArrayFormat::Bc7RgbaUnorm,
-            "unsupported texture array format"
-        );
-        self.create_gpu_texture(id, size, layers)
+        self.create_gpu_texture(id, size, layers, format)
     }
 
     fn upload_layer(&self, id: TextureArrayId, layer: u32, blocks: &[u8]) -> Result<()> {
@@ -179,15 +216,7 @@ impl TextureArrayPlatform for TextureArrayStore {
             layer < size.depth_or_array_layers,
             "texture array layer out of range"
         );
-        anyhow::ensure!(
-            size.width % 4 == 0 && size.height % 4 == 0,
-            "BC7 array dimensions must be multiples of four"
-        );
-        let blocks_x = size.width / 4;
-        let blocks_y = size.height / 4;
-        let row_bytes = blocks_x
-            .checked_mul(16)
-            .context("texture array row size overflow")?;
+        let (row_bytes, rows_per_image) = layer_row_layout(array.format, size.width, size.height)?;
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &array.texture,
@@ -203,7 +232,7 @@ impl TextureArrayPlatform for TextureArrayStore {
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(row_bytes),
-                rows_per_image: Some(blocks_y),
+                rows_per_image: Some(rows_per_image),
             },
             wgpu::Extent3d {
                 width: size.width,
@@ -239,4 +268,87 @@ pub(crate) fn init(
         gpui::replace_texture_array_platform(store.clone());
     }
     store
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AtlasTextureId, AtlasTextureKind, DevicePixels, size};
+
+    #[test]
+    fn rgba8_array_accepts_arbitrary_dimensions() {
+        let Ok((context, _)) = crate::WgpuContext::new_headless() else {
+            return;
+        };
+        let store = init(&context.device, &context.queue, false);
+        let id = TextureArrayId::from_atlas_texture_id(AtlasTextureId {
+            index: 0xD000_0000 + 42,
+            kind: AtlasTextureKind::Polychrome,
+        })
+        .expect("array id");
+        let array_size = size(DevicePixels(3), DevicePixels(2));
+        if store
+            .create_texture(id, array_size, 1, TextureArrayFormat::Rgba8Unorm)
+            .is_err()
+        {
+            return;
+        }
+        store
+            .upload_layer(id, 0, &[0u8; 3 * 2 * 4])
+            .expect("rgba8 upload");
+        store.remove_texture(id);
+    }
+
+    #[test]
+    fn rgba8_array_creation_succeeds_when_a_gpu_is_available() {
+        let Ok((context, _)) = crate::WgpuContext::new_headless() else {
+            return;
+        };
+        let store = init(&context.device, &context.queue, false);
+        let id = TextureArrayId::from_atlas_texture_id(AtlasTextureId {
+            index: 0xD000_0000 + 43,
+            kind: AtlasTextureKind::Polychrome,
+        })
+        .expect("array id");
+        store
+            .create_texture(
+                id,
+                size(DevicePixels(3), DevicePixels(2)),
+                1,
+                TextureArrayFormat::Rgba8Unorm,
+            )
+            .expect("rgba8 array");
+        store
+            .upload_layer(id, 0, &[0u8; 3 * 2 * 4])
+            .expect("rgba8 upload");
+        store.remove_texture(id);
+    }
+
+    #[test]
+    fn formats_map_to_matching_wgpu_texture_formats() {
+        assert_eq!(
+            wgpu_texture_format(TextureArrayFormat::Bc7RgbaUnorm),
+            Some(wgpu::TextureFormat::Bc7RgbaUnorm)
+        );
+        assert_eq!(
+            wgpu_texture_format(TextureArrayFormat::Rgba8Unorm),
+            Some(wgpu::TextureFormat::Rgba8Unorm)
+        );
+    }
+
+    #[test]
+    fn upload_rows_follow_the_array_format() {
+        assert_eq!(
+            layer_row_layout(TextureArrayFormat::Bc7RgbaUnorm, 8, 8).expect("bc7 layout"),
+            (32, 2)
+        );
+        assert_eq!(
+            layer_row_layout(TextureArrayFormat::Rgba8Unorm, 3, 2).expect("rgba8 layout"),
+            (12, 2)
+        );
+        assert!(
+            layer_row_layout(TextureArrayFormat::Bc7RgbaUnorm, 3, 2).is_err(),
+            "BC7 layers need whole 4x4 blocks"
+        );
+    }
 }
